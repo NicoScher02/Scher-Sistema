@@ -2,6 +2,7 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Scher — Sistema de Gestión</title>
 <style>
@@ -541,6 +542,98 @@ window.addEventListener('resize', () => {
   }, { passive: true });
 })();
 
+
+// ── UNIVERSAL QR SCANNER (works on iOS Safari, Chrome, Android, Desktop) ────
+// Uses jsQR library — no BarcodeDetector dependency
+
+function qrScanFrame(videoEl, canvasEl, onDetected, isActiveRef) {
+  function tick() {
+    if (!isActiveRef.active) return;
+    if (!videoEl || !canvasEl) return;
+    if (videoEl.readyState !== videoEl.HAVE_ENOUGH_DATA) {
+      requestAnimationFrame(tick); return;
+    }
+    canvasEl.width  = videoEl.videoWidth;
+    canvasEl.height = videoEl.videoHeight;
+    const ctx = canvasEl.getContext('2d');
+    ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
+
+    // Try jsQR first (works everywhere including iOS)
+    if (window.jsQR) {
+      const imageData = ctx.getImageData(0, 0, canvasEl.width, canvasEl.height);
+      const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+      if (code && code.data) {
+        onDetected(code.data);
+        return; // onDetected decides when to resume
+      }
+      requestAnimationFrame(tick);
+      return;
+    }
+
+    // Fallback: BarcodeDetector (Chrome/Android/Edge desktop)
+    if (window.BarcodeDetector) {
+      new BarcodeDetector({ formats: ['qr_code'] }).detect(canvasEl)
+        .then(codes => {
+          if (codes.length > 0) onDetected(codes[0].rawValue);
+          else requestAnimationFrame(tick);
+        }).catch(() => requestAnimationFrame(tick));
+      return;
+    }
+
+    // Nothing available
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+function crearInterfazCamara(videoId, canvasId, statusId, onDetected, isActiveRef, pausaMs) {
+  // Returns HTML string for the camera UI
+  return `
+    <div style="background:#000;border-radius:var(--radius);overflow:hidden;position:relative;max-width:340px;margin:0 auto">
+      <video id="${videoId}" style="width:100%;display:block" playsinline autoplay muted></video>
+      <canvas id="${canvasId}" style="display:none"></canvas>
+      <div style="position:absolute;inset:0;pointer-events:none;display:flex;align-items:center;justify-content:center">
+        <div style="width:200px;height:200px;border:3px solid rgba(255,255,255,0.85);border-radius:12px;box-shadow:0 0 0 9999px rgba(0,0,0,0.45)"></div>
+      </div>
+      <div id="${statusId}" style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.6);color:white;text-align:center;padding:8px;font-size:13px">
+        Apuntá la cámara al QR del bulto
+      </div>
+    </div>
+  `;
+}
+
+function iniciarCamara(videoId, streamRef, onReady, onError) {
+  const constraints = {
+    video: {
+      facingMode: { ideal: 'environment' },
+      width: { ideal: 1280 },
+      height: { ideal: 720 }
+    }
+  };
+  navigator.mediaDevices.getUserMedia(constraints)
+    .then(stream => {
+      streamRef.stream = stream;
+      const video = document.getElementById(videoId);
+      if (!video) { stream.getTracks().forEach(t => t.stop()); return; }
+      video.srcObject = stream;
+      video._stream = stream;
+      video.addEventListener('loadedmetadata', () => { video.play(); onReady(); }, { once: true });
+    })
+    .catch(err => onError(err));
+}
+
+function detenerCamara(videoId, isActiveRef) {
+  isActiveRef.active = false;
+  const video = document.getElementById(videoId);
+  if (video && video._stream) video._stream.getTracks().forEach(t => t.stop());
+}
+
+function setQRStatus(statusId, msg, color) {
+  const el = document.getElementById(statusId);
+  if (!el) return;
+  el.textContent = msg;
+  el.style.background = color || 'rgba(0,0,0,0.6)';
+}
 // ===================== AUTH =====================
 function doLogin() {
   const u = document.getElementById('login-user').value.trim();
@@ -1617,6 +1710,7 @@ function exportarCCPDF(clienteId) {
 <html lang="es">
 <head>
 <meta charset="UTF-8">
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <title>Cuenta Corriente — ${c.nombre}</title>
 <style>
   body { font-family: Arial, sans-serif; font-size: 12px; color: #1A1220; margin: 0; padding: 0; background: #fff; }
@@ -1791,76 +1885,49 @@ function cerrarCargaStockQR() {
 function iniciarCamaraStockQR() {
   const cont = document.getElementById('sqr-camara-cont');
   if (!cont) return;
-  cont.innerHTML = `
-    <div style="background:#000;border-radius:var(--radius);overflow:hidden;position:relative;max-width:340px;margin:0 auto">
-      <video id="sqr-video" style="width:100%;display:block" playsinline autoplay></video>
-      <canvas id="sqr-canvas" style="display:none"></canvas>
-      <div style="position:absolute;inset:0;pointer-events:none;display:flex;align-items:center;justify-content:center">
-        <div style="width:200px;height:200px;border:3px solid rgba(255,255,255,0.8);border-radius:12px;box-shadow:0 0 0 9999px rgba(0,0,0,0.4)"></div>
+  window._sqrCamRef = { stream: null };
+
+  cont.innerHTML = crearInterfazCamara('sqr-video','sqr-canvas','sqr-status') +
+    `<button class="btn btn-secondary btn-sm" style="margin-top:8px;width:100%;justify-content:center" onclick="detenerCamaraStockQR()">✕ Cerrar cámara</button>`;
+
+  iniciarCamara('sqr-video', window._sqrCamRef,
+    () => sqrScanLoop(),
+    (err) => {
+      cont.innerHTML = `<div class="alert alert-danger" style="margin:0">
+        Sin acceso a la cámara: ${err.message}<br>
+        <small>En iPhone: Configuración → Safari → Cámara → Permitir</small>
       </div>
-      <div id="sqr-status" style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.6);color:white;text-align:center;padding:8px;font-size:13px">
-        Apuntá al QR del bulto
-      </div>
-    </div>
-    <button class="btn btn-secondary btn-sm" style="margin-top:8px;width:100%;justify-content:center" onclick="detenerCamaraStockQR()">✕ Cerrar cámara</button>
-  `;
-  navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-    .then(stream => {
-      const video = document.getElementById('sqr-video');
-      if (!video) { stream.getTracks().forEach(t => t.stop()); return; }
-      video.srcObject = stream;
-      video._stream = stream;
-      sqrScanLoop();
-    })
-    .catch(err => {
-      cont.innerHTML = `<div class="alert alert-danger">No se pudo acceder a la cámara: ${err.message}</div>`;
-    });
+      <button class="btn btn-primary" style="margin-top:8px;width:100%;justify-content:center" onclick="iniciarCamaraStockQR()">🔄 Reintentar</button>`;
+    }
+  );
 }
 
 function detenerCamaraStockQR() {
-  const video = document.getElementById('sqr-video');
-  if (video && video._stream) video._stream.getTracks().forEach(t => t.stop());
-  window._sqrScanActive = false;
+  if (window._sqrScanRef) window._sqrScanRef.active = false;
+  detenerCamara('sqr-video', window._sqrScanRef || { active: false });
   const cont = document.getElementById('sqr-camara-cont');
   if (cont) cont.innerHTML = `<button class="btn btn-primary" style="width:100%;justify-content:center;font-size:15px;padding:12px" onclick="iniciarCamaraStockQR()">📷 Activar cámara para escanear</button>`;
 }
 
 function sqrScanLoop() {
-  window._sqrScanActive = true;
-  function tick() {
-    if (!window._sqrScanActive) return;
-    if (!document.getElementById('overlay-modal-stock-qr')) { window._sqrScanActive = false; return; }
-    const video = document.getElementById('sqr-video');
-    const canvas = document.getElementById('sqr-canvas');
-    if (!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA) { requestAnimationFrame(tick); return; }
-    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-    canvas.getContext('2d').drawImage(video, 0, 0);
-    if (window.BarcodeDetector) {
-      new BarcodeDetector({ formats: ['qr_code'] }).detect(canvas)
-        .then(codes => {
-          if (codes.length > 0) {
-            window._sqrScanActive = false;
-            procesarQRStockEscaneado(codes[0].rawValue);
-            const status = document.getElementById('sqr-status');
-            if (status) {
-              status.textContent = '✓ Escaneado!';
-              status.style.background = 'rgba(22,163,74,0.8)';
-            }
-            setTimeout(() => {
-              const s2 = document.getElementById('sqr-status');
-              if (s2) { s2.textContent = 'Apuntá al siguiente bulto'; s2.style.background = 'rgba(0,0,0,0.6)'; }
-              window._sqrScanActive = true;
-              requestAnimationFrame(tick);
-            }, 1500);
-          } else { requestAnimationFrame(tick); }
-        }).catch(() => requestAnimationFrame(tick));
-    } else {
-      const status = document.getElementById('sqr-status');
-      if (status) status.textContent = 'Cámara sin detección automática — usá lector físico';
-      window._sqrScanActive = false;
-    }
+  window._sqrScanRef = { active: true };
+  const video  = document.getElementById('sqr-video');
+  const canvas = document.getElementById('sqr-canvas');
+  if (!video || !canvas) return;
+
+  function onDetected(raw) {
+    if (!window._sqrScanRef.active) return;
+    window._sqrScanRef.active = false;
+    procesarQRStockEscaneado(raw);
+    setQRStatus('sqr-status', '✓ Escaneado!', 'rgba(22,163,74,0.8)');
+    setTimeout(() => {
+      if (!document.getElementById('overlay-modal-stock-qr')) return;
+      setQRStatus('sqr-status', 'Apuntá al siguiente bulto');
+      window._sqrScanRef.active = true;
+      qrScanFrame(video, canvas, onDetected, window._sqrScanRef);
+    }, 1500);
   }
-  requestAnimationFrame(tick);
+  qrScanFrame(video, canvas, onDetected, window._sqrScanRef);
 }
 
 // Also listen for physical scanner keyboard input
@@ -3058,6 +3125,7 @@ function generarPDFEtiquetas() {
 <html lang="es">
 <head>
 <meta charset="UTF-8">
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <title>Etiquetas — ${art.nombre}</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -3315,181 +3383,350 @@ function imprimirCodigosBulto() {
   showToast('Etiquetas descargadas — abrí el archivo e imprimí');
 }
 
+// ── NUEVO FLUJO DE VERIFICACIÓN ─────────────────────────────────────────────
+// Fase 1: escanear libremente todos los bultos
+// Fase 2: revisar resultados y confirmar si todo está completo
+
 function abrirPreparacion(ordenId) {
   const o = DB.ordenes.find(x=>x.id===ordenId);
   if (!o) return;
   const cliente = getCliente(o.clienteId);
-
-  // Init verificacion state
-  if (!o.verificacion) {
-    o.verificacion = {};
-    o.items.forEach((item, idx) => { o.verificacion[idx] = 0; });
-  }
-
-  const itemsHtml = o.items.map((item, idx) => {
-    const art = DB.articulos.find(a=>a.id===item.articuloId);
-    const bulto = art?.unidadesBulto || 1;
-    const bultosCant = Math.ceil(item.cant / bulto);
-    const bultosCompletos = Math.floor(item.cant / bulto);
-    const resto = item.cant % bulto;
-    const verificado = o.verificacion[idx] || 0;
-    const completo = verificado >= item.cant;
-    const codBulto = 'BLT-' + item.codigo;
-
-    return `<div id="prep-item-${idx}" style="border:2px solid ${completo?'var(--green)':'var(--border)'};border-radius:var(--radius);padding:16px;margin-bottom:12px;background:${completo?'var(--green-light)':'var(--surface)'}">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
-        <div>
-          <div style="font-weight:700;font-size:15px">${item.nombre}</div>
-          <div style="font-size:13px;color:var(--text2);margin-top:2px">
-            ${item.color ? `<span style="background:var(--surface2);padding:2px 8px;border-radius:20px;font-size:12px">${item.color}</span>` : ''}
-            <span style="margin-left:6px;font-family:monospace;font-size:12px;color:var(--text3)">${item.codigo}</span>
-          </div>
-        </div>
-        <div style="text-align:right">
-          <div style="font-size:22px;font-weight:800;color:${completo?'var(--green)':'var(--accent)'}">${verificado}/${item.cant}</div>
-          <div style="font-size:11px;color:var(--text3)">unidades</div>
-        </div>
-      </div>
-
-      <div style="background:var(--surface2);border-radius:20px;height:10px;overflow:hidden;margin-bottom:14px">
-        <div style="height:100%;border-radius:20px;background:${completo?'var(--green)':'var(--accent)'};width:${Math.min(100,Math.round(verificado/item.cant*100))}%;transition:width 0.3s"></div>
-      </div>
-
-      <div style="font-size:12px;color:var(--text3);margin-bottom:10px">
-        Bulto: <strong>${bulto} u</strong> ·
-        ${bultosCompletos > 0 ? `<strong>${bultosCompletos}</strong> bulto${bultosCompletos!==1?'s':''} completo${bultosCompletos!==1?'s':''}` : ''}
-        ${resto > 0 ? ` + <strong>${resto}</strong> unidad${resto!==1?'es':''} sueltas` : ''}
-        · QR: <span style="font-family:monospace;font-size:11px;background:var(--surface);padding:1px 5px;border-radius:3px">${item.codigo}</span>
-      </div>
-
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${!completo ? `
-        <button class="btn btn-primary" style="flex:1;justify-content:center;font-size:14px;padding:10px"
-          onclick="escanearBulto(${ordenId},${idx},${bulto})">
-          📦 Escanear / +${bulto} (1 bulto)
-        </button>
-        ${resto > 0 && bultosCompletos === Math.floor(verificado/bulto) ? `
-        <button class="btn btn-secondary" style="font-size:13px;padding:10px"
-          onclick="escanearBulto(${ordenId},${idx},${resto})">
-          +${resto} sueltas
-        </button>` : ''}
-        <button class="btn btn-secondary" style="font-size:13px;padding:10px"
-          onclick="escanearBulto(${ordenId},${idx},1)">
-          +1
-        </button>
-        ${verificado > 0 ? `<button class="btn btn-danger" style="font-size:12px;padding:10px" onclick="deshacerVerif(${ordenId},${idx})">↩</button>` : ''}
-        ` : `
-        <div style="background:var(--green-light);color:var(--green-text);border-radius:var(--radius-sm);padding:10px 16px;font-weight:600;font-size:14px;width:100%;text-align:center">
-          ✅ Listo
-        </div>
-        <button class="btn btn-secondary btn-sm" onclick="deshacerVerif(${ordenId},${idx})">↩ Corregir</button>
-        `}
-      </div>
-    </div>`;
-  }).join('');
-
   const totalUnidades = o.items.reduce((s,i)=>s+i.cant,0);
-  const totalVerif = o.items.reduce((s,i,idx)=>s+(o.verificacion[idx]||0),0);
-  const todosListos = totalVerif >= totalUnidades;
+
+  // Reset session scan buffer for this prep
+  window._prepScan = { ordenId, escaneados: [] }; // [{codigo, variante, bulto, cantidad}]
 
   showModal('modal-prep', `
     <div class="modal-header" style="position:sticky;top:0;z-index:10;background:var(--surface)">
       <div>
         <div class="modal-title">📦 Preparar Orden #${String(o.numero).padStart(4,'0')}</div>
-        <div style="font-size:12px;color:var(--text3);margin-top:2px">${cliente?.nombre||'-'} · ${o.items.length} productos · ${totalUnidades} unidades</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:2px">${cliente?.nombre||'-'} · ${o.items.length} producto${o.items.length!==1?'s':''} · ${totalUnidades} unidades</div>
       </div>
-      <button class="close-btn" onclick="closeModal('modal-prep')">✕</button>
+      <button class="close-btn" onclick="cerrarPreparacion()">✕</button>
     </div>
-    <div style="padding:12px 20px;border-bottom:1px solid var(--border);background:var(--surface2)" id="qr-scanner-cont">
-      <button class="btn btn-primary" style="width:100%;justify-content:center;font-size:14px;padding:12px" onclick="abrirCamaraQR(${ordenId})">
-        📷 Escanear QR con cámara
+
+    <!-- Cámara -->
+    <div style="padding:12px 16px;border-bottom:1px solid var(--border);background:var(--surface2)" id="qr-scanner-cont">
+      <button class="btn btn-primary" style="width:100%;justify-content:center;font-size:15px;padding:12px" onclick="abrirCamaraQR(${ordenId})">
+        📷 Activar cámara para escanear bultos
       </button>
     </div>
-    <div style="background:var(--surface2);padding:12px 20px;border-bottom:1px solid var(--border)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <span style="font-size:13px;font-weight:600">Progreso total</span>
-        <span style="font-size:15px;font-weight:700;color:${todosListos?'var(--green)':'var(--accent)'}">${totalVerif}/${totalUnidades} unidades</span>
-      </div>
-      <div style="background:var(--border);border-radius:20px;height:12px;overflow:hidden">
-        <div style="height:100%;border-radius:20px;background:${todosListos?'var(--green)':'var(--accent)'};width:${totalUnidades>0?Math.round(totalVerif/totalUnidades*100):0}%;transition:width 0.3s"></div>
+
+    <!-- Referencia de la orden -->
+    <div style="padding:12px 16px;border-bottom:1px solid var(--border)">
+      <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Lo que debe tener la orden</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${o.items.map(item => {
+          const art = DB.articulos.find(a=>a.id===item.articuloId);
+          const bulto = art?.unidadesBulto||1;
+          const bultosNecesarios = Math.ceil(item.cant/bulto);
+          return `<div style="display:flex;justify-content:space-between;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 12px">
+            <div>
+              <span style="font-weight:600;font-size:13px">${item.nombre}</span>
+              ${item.color?`<span style="background:var(--purple-light);color:var(--purple);padding:1px 7px;border-radius:20px;font-size:11px;font-weight:600;margin-left:6px">${item.color}</span>`:''}
+            </div>
+            <div style="text-align:right;font-size:12px;color:var(--text2)">
+              <span style="font-weight:700;font-size:14px;color:var(--text)">${item.cant} u</span>
+              <span style="color:var(--text3);margin-left:4px">(${bultosNecesarios} bulto${bultosNecesarios!==1?'s':''})</span>
+            </div>
+          </div>`;
+        }).join('')}
       </div>
     </div>
-    <div class="modal-body" style="padding:16px 20px" id="prep-items-cont">
-      ${itemsHtml}
+
+    <!-- Lista de escaneados en tiempo real -->
+    <div class="modal-body" style="padding:12px 16px">
+      <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Bultos escaneados</div>
+      <div id="prep-scan-lista">
+        <p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">Todavía no escaneaste ningún bulto</p>
+      </div>
     </div>
-    <div class="modal-footer" id="prep-footer">
-      <button class="btn btn-secondary" onclick="closeModal('modal-prep')">Cerrar</button>
-      ${todosListos
-        ? `<button class="btn btn-success" onclick="marcarOrdenPreparada(${ordenId})" style="font-size:15px;padding:12px 24px">✅ Marcar como preparado</button>`
-        : `<button class="btn btn-secondary" onclick="marcarOrdenPreparada(${ordenId})" style="opacity:0.6">Marcar preparado (incompleto)</button>`
-      }
+
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="cerrarPreparacion()">Cancelar</button>
+      <button class="btn btn-primary" id="btn-finalizar-scan" style="font-size:14px;padding:10px 20px" onclick="finalizarEscaneoPreparacion(${ordenId})">
+        Finalizar escaneo →
+      </button>
     </div>
   `, 'modal-lg');
 
-  // Setup barcode scanner input
   setupBarcodeScanner(ordenId);
 }
 
+function cerrarPreparacion() {
+  if (window._prepScanRef) window._prepScanRef.active = false;
+  if (window._prepCamRef?.stream) window._prepCamRef.stream.getTracks().forEach(t=>t.stop());
+  const v = document.getElementById('qr-video');
+  if (v && v._stream) v._stream.getTracks().forEach(t=>t.stop());
+  closeModal('modal-prep');
+}
+
 function setupBarcodeScanner(ordenId) {
-  // Keep keyboard listener for physical barcode scanners (they type fast)
-  let barcodeBuffer = '';
-  let barcodeTimer = null;
+  let buf = '', timer = null;
   const handler = (e) => {
-    if (e.key === 'Enter' && barcodeBuffer.length > 2) {
-      procesarCodigoEscaneado(ordenId, barcodeBuffer.trim());
-      barcodeBuffer = '';
-      return;
+    if (!document.getElementById('overlay-modal-prep')) {
+      document.removeEventListener('keydown', handler); return;
+    }
+    if (e.key === 'Enter' && buf.length > 2) {
+      acumularBultoEscaneado(buf.trim()); buf = ''; return;
     }
     if (e.key.length === 1) {
-      barcodeBuffer += e.key;
-      clearTimeout(barcodeTimer);
-      barcodeTimer = setTimeout(() => { barcodeBuffer = ''; }, 200);
+      buf += e.key;
+      clearTimeout(timer);
+      timer = setTimeout(() => { buf = ''; }, 200);
     }
   };
   document.addEventListener('keydown', handler);
-  const checkClosed = setInterval(() => {
+  const check = setInterval(() => {
     if (!document.getElementById('overlay-modal-prep')) {
       document.removeEventListener('keydown', handler);
-      clearInterval(checkClosed);
+      clearInterval(check);
     }
   }, 500);
 }
 
-function abrirCamaraQR(ordenId) {
-  // Inject camera scanner UI into the modal
-  const cont = document.getElementById('qr-scanner-cont');
-  if (!cont) return;
+// Acumula cada QR escaneado sin validar aún contra la orden
+function acumularBultoEscaneado(raw) {
+  if (!window._prepScan) return;
+  let codigo = raw, variante = null, bulto = 1;
+  try {
+    const p = JSON.parse(raw);
+    if (p.codigo) { codigo = p.codigo; variante = p.variante || null; bulto = p.bulto || 1; }
+  } catch(e) {}
 
-  cont.innerHTML = `
-    <div style="background:#000;border-radius:var(--radius);overflow:hidden;position:relative;max-width:340px;margin:0 auto">
-      <video id="qr-video" style="width:100%;display:block" playsinline autoplay></video>
-      <canvas id="qr-canvas" style="display:none"></canvas>
-      <div style="position:absolute;inset:0;pointer-events:none;display:flex;align-items:center;justify-content:center">
-        <div style="width:200px;height:200px;border:3px solid rgba(255,255,255,0.8);border-radius:12px;box-shadow:0 0 0 9999px rgba(0,0,0,0.4)"></div>
+  // Find the art to get bulto size if not in QR
+  if (bulto === 1) {
+    const art = DB.articulos.find(a => a.codigo === codigo);
+    if (art) bulto = art.unidadesBulto || 1;
+  }
+
+  const key = codigo + '|' + (variante||'');
+  const art = DB.articulos.find(a => a.codigo === codigo);
+  const artNombre = art?.nombre || codigo;
+  const existing = window._prepScan.escaneados.find(x => x.key === key);
+  if (existing) {
+    existing.cantidad += bulto;
+    existing.bultos++;
+  } else {
+    window._prepScan.escaneados.push({
+      key, codigo, variante, bulto, cantidad: bulto, bultos: 1,
+      nombre: artNombre
+    });
+  }
+  renderPrepScanLista();
+  setQRStatus('qr-status', '✓ ' + artNombre + (variante?' '+variante:'') + ' +' + bulto + 'u', 'rgba(22,163,74,0.8)');
+  setTimeout(() => setQRStatus('qr-status', 'Apuntá la cámara al siguiente bulto'), 1200);
+}
+
+function renderPrepScanLista() {
+  const lista = document.getElementById('prep-scan-lista');
+  if (!lista) return;
+  const items = window._prepScan?.escaneados || [];
+  if (!items.length) {
+    lista.innerHTML = '<p style="color:var(--text3);font-size:13px;text-align:center;padding:20px 0">Todavía no escaneaste ningún bulto</p>';
+    return;
+  }
+  lista.innerHTML = items.map((item,i) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:6px">
+      <div>
+        <span style="font-weight:600;font-size:13px">${item.nombre}</span>
+        ${item.variante?`<span style="background:var(--purple-light);color:var(--purple);padding:1px 7px;border-radius:20px;font-size:11px;font-weight:600;margin-left:6px">${item.variante}</span>`:''}
+        <div style="font-size:11px;color:var(--text3);margin-top:2px">${item.bultos} bulto${item.bultos!==1?'s':''} escaneado${item.bultos!==1?'s':''}</div>
       </div>
-      <div id="qr-status" style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.6);color:white;text-align:center;padding:8px;font-size:13px">
-        Apuntá la cámara al QR del bulto
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:16px;font-weight:700;color:var(--accent)">${item.cantidad} u</span>
+        <button class="btn btn-sm btn-danger" onclick="quitarBultoPrep(${i})" title="Quitar">✕</button>
       </div>
     </div>
-    <button class="btn btn-secondary btn-sm" style="margin-top:8px;width:100%;justify-content:center" onclick="cerrarCamaraQR()">✕ Cerrar cámara</button>
-  `;
+  `).join('');
+}
 
-  navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-    .then(stream => {
-      const video = document.getElementById('qr-video');
-      if (!video) { stream.getTracks().forEach(t=>t.stop()); return; }
-      video.srcObject = stream;
-      video._stream = stream;
-      scanQRLoop(ordenId);
-    })
-    .catch(err => {
-      cont.innerHTML = `<div class="alert alert-danger">No se pudo acceder a la cámara: ${err.message}.<br>Usá el botón de escaneo manual en cada ítem.</div>`;
-    });
+function quitarBultoPrep(idx) {
+  if (!window._prepScan) return;
+  window._prepScan.escaneados.splice(idx, 1);
+  renderPrepScanLista();
+}
+
+function finalizarEscaneoPreparacion(ordenId) {
+  const o = DB.ordenes.find(x=>x.id===ordenId);
+  if (!o) return;
+  const escaneados = window._prepScan?.escaneados || [];
+
+  // Stop camera
+  if (window._prepScanRef) window._prepScanRef.active = false;
+  const v = document.getElementById('qr-video');
+  if (v && v._stream) v._stream.getTracks().forEach(t=>t.stop());
+
+  // Build comparison: match each order item against scanned
+  const resultado = o.items.map((item, idx) => {
+    const key = item.codigo + '|' + (item.color||'');
+    const escaneado = escaneados.find(e => e.key === key);
+    const cantEscaneada = escaneado?.cantidad || 0;
+    const ok = cantEscaneada >= item.cant;
+    const exceso = cantEscaneada > item.cant;
+    return { item, idx, cantEscaneada, ok, exceso, faltante: item.cant - cantEscaneada };
+  });
+
+  // Items scanned but NOT in order
+  const noCorresponden = escaneados.filter(e => {
+    return !o.items.find(item => (item.codigo + '|' + (item.color||'')) === e.key);
+  });
+
+  const todoOk = resultado.every(r => r.ok) && noCorresponden.length === 0;
+  const hayFaltantes = resultado.some(r => !r.ok);
+
+  // Build review HTML
+  const filaResultado = (r) => {
+    const art = DB.articulos.find(a=>a.id===r.item.articuloId);
+    const bulto = art?.unidadesBulto||1;
+    if (r.ok && !r.exceso) {
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:#f0fdf4;border:1.5px solid #86efac;border-radius:var(--radius-sm);margin-bottom:8px">
+        <div>
+          <span style="font-size:22px;margin-right:8px">✅</span>
+          <span style="font-weight:600">${r.item.nombre}</span>
+          ${r.item.color?`<span style="background:#e9d5ff;color:#6b21a8;padding:1px 7px;border-radius:20px;font-size:11px;font-weight:600;margin-left:6px">${r.item.color}</span>`:''}
+        </div>
+        <span style="font-weight:700;color:#16a34a">${r.cantEscaneada} / ${r.item.cant} u</span>
+      </div>`;
+    } else if (r.exceso) {
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:#fffbeb;border:1.5px solid #fbbf24;border-radius:var(--radius-sm);margin-bottom:8px">
+        <div>
+          <span style="font-size:22px;margin-right:8px">⚠️</span>
+          <span style="font-weight:600">${r.item.nombre}</span>
+          ${r.item.color?`<span style="background:#e9d5ff;color:#6b21a8;padding:1px 7px;border-radius:20px;font-size:11px;font-weight:600;margin-left:6px">${r.item.color}</span>`:''}
+          <div style="font-size:12px;color:#92400e;margin-top:2px">Hay ${r.cantEscaneada - r.item.cant} unidades de más separadas</div>
+        </div>
+        <span style="font-weight:700;color:#d97706">${r.cantEscaneada} / ${r.item.cant} u</span>
+      </div>`;
+    } else {
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:#fef2f2;border:1.5px solid #fca5a5;border-radius:var(--radius-sm);margin-bottom:8px">
+        <div>
+          <span style="font-size:22px;margin-right:8px">❌</span>
+          <span style="font-weight:600">${r.item.nombre}</span>
+          ${r.item.color?`<span style="background:#e9d5ff;color:#6b21a8;padding:1px 7px;border-radius:20px;font-size:11px;font-weight:600;margin-left:6px">${r.item.color}</span>`:''}
+          <div style="font-size:12px;color:#991b1b;margin-top:2px">Faltan ${r.faltante} unidades (${Math.ceil(r.faltante/bulto)} bulto${Math.ceil(r.faltante/bulto)!==1?'s':''})</div>
+        </div>
+        <span style="font-weight:700;color:#dc2626">${r.cantEscaneada} / ${r.item.cant} u</span>
+      </div>`;
+    }
+  };
+
+  const filasNoCorresponden = noCorresponden.map(e => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:#fef2f2;border:1.5px solid #fca5a5;border-radius:var(--radius-sm);margin-bottom:8px">
+      <div>
+        <span style="font-size:22px;margin-right:8px">🚫</span>
+        <span style="font-weight:600">${e.nombre}</span>
+        ${e.variante?`<span style="background:#e9d5ff;color:#6b21a8;padding:1px 7px;border-radius:20px;font-size:11px;font-weight:600;margin-left:6px">${e.variante}</span>`:''}
+        <div style="font-size:12px;color:#991b1b;margin-top:2px">No pertenece a esta orden</div>
+      </div>
+      <span style="font-weight:700;color:#dc2626">${e.cantidad} u extra</span>
+    </div>
+  `).join('');
+
+  const resumenMsg = todoOk
+    ? `<div style="background:#f0fdf4;border:2px solid #86efac;border-radius:var(--radius);padding:14px 18px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
+        <span style="font-size:28px">✅</span>
+        <div><div style="font-weight:700;font-size:15px;color:#14532d">¡Todo correcto!</div>
+        <div style="font-size:13px;color:#16a34a">Todos los artículos de la orden están presentes</div></div>
+       </div>`
+    : `<div style="background:#fef2f2;border:2px solid #fca5a5;border-radius:var(--radius);padding:14px 18px;margin-bottom:16px;display:flex;align-items:center;gap:12px">
+        <span style="font-size:28px">❌</span>
+        <div><div style="font-weight:700;font-size:15px;color:#7f1d1d">Faltan artículos</div>
+        <div style="font-size:13px;color:#dc2626">Completá el pedido antes de confirmar</div></div>
+       </div>`;
+
+  // Replace modal content with review screen
+  const body = document.querySelector('#overlay-modal-prep .modal');
+  if (!body) return;
+  body.innerHTML = `
+    <div class="modal-header" style="position:sticky;top:0;z-index:10;background:var(--surface)">
+      <div>
+        <div class="modal-title">📋 Revisión — Orden #${String(o.numero).padStart(4,'0')}</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:2px">Verificá que todo esté correcto antes de confirmar</div>
+      </div>
+      <button class="close-btn" onclick="cerrarPreparacion()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${resumenMsg}
+      <div style="font-size:12px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px">Detalle por artículo</div>
+      ${resultado.map(r => filaResultado(r)).join('')}
+      ${noCorresponden.length ? `
+        <div style="font-size:12px;font-weight:600;color:var(--red);text-transform:uppercase;letter-spacing:0.5px;margin:14px 0 10px">Artículos escaneados que no pertenecen a la orden</div>
+        ${filasNoCorresponden}
+      ` : ''}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="volverAEscanear(${ordenId})">← Volver a escanear</button>
+      <button class="btn btn-success" ${hayFaltantes ? 'disabled style="opacity:0.4;cursor:not-allowed"' : `onclick="confirmarOrdenPreparada(${ordenId})"`}
+        style="font-size:15px;padding:12px 24px${hayFaltantes?';opacity:0.4;cursor:not-allowed':''}">
+        ✅ Confirmar pedido preparado
+      </button>
+    </div>
+  `;
+}
+
+function volverAEscanear(ordenId) {
+  // Reopen prep screen keeping scanned items
+  abrirPreparacion(ordenId);
+  // Restore previous scan data
+  setTimeout(() => renderPrepScanLista(), 100);
+}
+
+function confirmarOrdenPreparada(ordenId) {
+  marcarOrdenPreparada(ordenId);
+}
+
+function procesarQREscaneado(ordenId, raw) {
+  // In new flow: just accumulate
+  acumularBultoEscaneado(raw);
+}
+
+function procesarCodigoEscaneado(ordenId, raw) {
+  // In new flow: just accumulate
+  acumularBultoEscaneado(raw);
+}
+
+function escanearBulto(ordenId, itemIdx, cantidad) {
+  // Legacy fallback — kept for compatibility
+  const o = DB.ordenes.find(x=>x.id===ordenId);
+  if (!o || !o.verificacion) return;
+  const item = o.items[itemIdx];
+  const actual = o.verificacion[itemIdx] || 0;
+  o.verificacion[itemIdx] = actual + cantidad;
+  const totalUnidades = o.items.reduce((s,i)=>s+i.cant,0);
+  const totalVerif = o.items.reduce((s,i,idx)=>s+(o.verificacion[idx]||0),0);
+  o.progPreparacion = totalUnidades > 0 ? Math.round(totalVerif/totalUnidades*100) : 0;
+}
+
+function deshacerVerif(ordenId, itemIdx) {
+  const o = DB.ordenes.find(x=>x.id===ordenId);
+  if (!o) return;
+  o.verificacion[itemIdx] = 0;
+}
+
+function abrirCamaraQR(ordenId) {
+  const cont = document.getElementById('qr-scanner-cont');
+  if (!cont) return;
+  window._prepCamRef = { stream: null };
+
+  cont.innerHTML = crearInterfazCamara('qr-video','qr-canvas','qr-status') +
+    `<button class="btn btn-secondary btn-sm" style="margin-top:8px;width:100%;justify-content:center" onclick="cerrarCamaraQR()">✕ Cerrar cámara</button>`;
+
+  iniciarCamara('qr-video', window._prepCamRef,
+    () => scanQRLoop(ordenId),
+    (err) => {
+      cont.innerHTML = `<div class="alert alert-danger" style="margin:0">
+        Sin acceso a la cámara: ${err.message}<br>
+        <small>En iPhone: Configuración → Safari → Cámara → Permitir</small>
+      </div>
+      <button class="btn btn-primary" style="margin-top:8px;width:100%;justify-content:center" onclick="abrirCamaraQR(${ordenId})">🔄 Reintentar</button>`;
+    }
+  );
 }
 
 function cerrarCamaraQR() {
-  const video = document.getElementById('qr-video');
-  if (video && video._stream) video._stream.getTracks().forEach(t=>t.stop());
+  if (window._prepScanRef) window._prepScanRef.active = false;
+  detenerCamara('qr-video', window._prepScanRef || { active: false });
   const cont = document.getElementById('qr-scanner-cont');
   if (cont) cont.innerHTML = `<button class="btn btn-primary" style="width:100%;justify-content:center;font-size:14px;padding:12px" onclick="abrirCamaraQR(window._qrOrdenId)">📷 Escanear QR con cámara</button>`;
 }
@@ -3497,48 +3734,24 @@ function cerrarCamaraQR() {
 let _qrScanActive = false;
 function scanQRLoop(ordenId) {
   window._qrOrdenId = ordenId;
-  _qrScanActive = true;
+  window._prepScanRef = { active: true };
 
-  function tick() {
-    if (!_qrScanActive) return;
-    if (!document.getElementById('overlay-modal-prep')) { _qrScanActive = false; return; }
-    const video = document.getElementById('qr-video');
-    const canvas = document.getElementById('qr-canvas');
-    if (!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA) { requestAnimationFrame(tick); return; }
+  const video  = document.getElementById('qr-video');
+  const canvas = document.getElementById('qr-canvas');
+  if (!video || !canvas) return;
 
-    canvas.height = video.videoHeight;
-    canvas.width = video.videoWidth;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-    // Use BarcodeDetector API if available (Chrome/Edge/Android)
-    if (window.BarcodeDetector) {
-      new BarcodeDetector({ formats: ['qr_code'] })
-        .detect(canvas)
-        .then(barcodes => {
-          if (barcodes.length > 0) {
-            _qrScanActive = false;
-            const raw = barcodes[0].rawValue;
-            procesarQREscaneado(ordenId, raw);
-            // Brief pause then resume
-            setTimeout(() => {
-              _qrScanActive = true;
-              requestAnimationFrame(tick);
-            }, 2000);
-          } else {
-            requestAnimationFrame(tick);
-          }
-        })
-        .catch(() => requestAnimationFrame(tick));
-    } else {
-      // BarcodeDetector not available — show message
-      const status = document.getElementById('qr-status');
-      if (status) status.textContent = 'Tu navegador no soporta escaneo automático. Usá Chrome en Android o los botones manuales.';
-      _qrScanActive = false;
-    }
-  }
-  requestAnimationFrame(tick);
+  qrScanFrame(video, canvas, (raw) => {
+    if (!window._prepScanRef.active) return;
+    window._prepScanRef.active = false;
+    procesarQREscaneado(ordenId, raw);
+    setQRStatus('qr-status', '✓ Leído — esperando...', 'rgba(22,163,74,0.8)');
+    setTimeout(() => {
+      if (!document.getElementById('overlay-modal-prep')) return;
+      setQRStatus('qr-status', 'Apuntá la cámara al QR del bulto');
+      window._prepScanRef.active = true;
+      qrScanFrame(video, canvas, onQRDetected, window._prepScanRef);
+    }, 2000);
+  }, window._prepScanRef);
 }
 
 function procesarQREscaneado(ordenId, raw) {
@@ -4424,7 +4637,8 @@ function imprimirRemitoTransito(id) {
     </div>
   `;
 
-  const contenido = `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Remito Tránsito #${r.numero}</title>
+  const contenido = `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script><title>Remito Tránsito #${r.numero}</title>
     <style>body{margin:0;padding:20px;background:#f5f5f5} @media print{body{background:white;padding:0} .no-print{display:none}}</style>
   </head><body>
     <div class="no-print" style="text-align:center;margin-bottom:16px">
