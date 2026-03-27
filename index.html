@@ -1710,7 +1710,7 @@ function exportarCCPDF(clienteId) {
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"><\/script>
 <title>Cuenta Corriente — ${c.nombre}</title>
 <style>
   body { font-family: Arial, sans-serif; font-size: 12px; color: #1A1220; margin: 0; padding: 0; background: #fff; }
@@ -3125,7 +3125,7 @@ function generarPDFEtiquetas() {
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"><\/script>
 <title>Etiquetas — ${art.nombre}</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -3364,13 +3364,13 @@ function imprimirCodigosBulto() {
       <button onclick="window.print()" style="background:#16A34A;color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer">🖨 Imprimir</button>
     </div>
     <div id="etiquetas-cont">${[1,2,3,4].map(n=>etiqueta(n)).join('')}</div>
-    <script>
+    <scr'ipt>
       function regenerar(){
         const q=parseInt(document.getElementById('qty').value)||1;
         const arr=[];for(let i=1;i<=q;i++)arr.push(i);
         document.getElementById('etiquetas-cont').innerHTML=arr.map(n=>\`${etiqueta('N').replace(/`/g,'\`').replace(/\${n}/g,'NNUM')}\`.replace('NNUM',n)).join('');
       }
-    <\/script>
+    </scr'ipt>
     </body></html>`;
 
   const blob = new Blob([contenido], {type:'text/html;charset=utf-8'});
@@ -4638,7 +4638,7 @@ function imprimirRemitoTransito(id) {
   `;
 
   const contenido = `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
-<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script><title>Remito Tránsito #${r.numero}</title>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"><\/script><title>Remito Tránsito #${r.numero}</title>
     <style>body{margin:0;padding:20px;background:#f5f5f5} @media print{body{background:white;padding:0} .no-print{display:none}}</style>
   </head><body>
     <div class="no-print" style="text-align:center;margin-bottom:16px">
