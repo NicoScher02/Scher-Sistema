@@ -402,10 +402,10 @@
 // ===================== DATA STORE =====================
 const DB = {
   users: [
-    { id:1, username:'admin', password:'admin123', name:'Administrador', role:'admin', initials:'AD' },
-    { id:2, username:'vendedor1', password:'vend123', name:'Juan Pérez', role:'interno', initials:'JP' },
-    { id:3, username:'externo1', password:'ext123', name:'María García', role:'externo', initials:'MG' },
-    { id:4, username:'fabrica', password:'fab123', name:'Personal Fábrica', role:'fabrica', initials:'FA' }
+    { id:1, username:'admin', password:'admin123', name:'Administrador', role:'admin', initials:'AD', permisos:['ver_ops_otros','carga_pedidos','carga_cobranzas','agregar_ops_cajas','modificar_ops_cajas','ver_reportes_venta','aprobar_entrega_otros','aprobar_propia_entrega'] },
+    { id:2, username:'vendedor1', password:'vend123', name:'Juan Pérez', role:'interno', initials:'JP', permisos:['carga_pedidos','carga_cobranzas','aprobar_propia_entrega'] },
+    { id:3, username:'externo1', password:'ext123', name:'María García', role:'externo', initials:'MG', permisos:['carga_pedidos','aprobar_propia_entrega'] },
+    { id:4, username:'fabrica', password:'fab123', name:'Personal Fábrica', role:'fabrica', initials:'FA', permisos:[] }
   ],
   clientes: [
     { id:1, nombre:'Empresa ABC', cuit:'20-12345678-9', telefono:'011-4444-5555', email:'abc@empresa.com', direccion:'Av. Corrientes 1234', notas:'' },
@@ -662,6 +662,24 @@ function doLogout() {
 
 function roleLabel(r) { return {admin:'Administrador', interno:'Vendedor Interno', externo:'Vendedor Externo', fabrica:'Personal Fábrica'}[r] || r; }
 
+const PERMISOS_LISTA = [
+  { id:'ver_ops_otros',          label:'Ver operaciones de otros usuarios' },
+  { id:'carga_pedidos',          label:'Carga de pedidos' },
+  { id:'carga_cobranzas',        label:'Carga de cobranzas' },
+  { id:'agregar_ops_cajas',      label:'Agregar operaciones en cajas' },
+  { id:'modificar_ops_cajas',    label:'Modificar operaciones en cajas' },
+  { id:'ver_reportes_venta',     label:'Ver reportes de venta' },
+  { id:'aprobar_entrega_otros',  label:'Aprobar entrega de órdenes de otros usuarios' },
+  { id:'aprobar_propia_entrega', label:'Aprobar entrega de sus propias órdenes' },
+];
+
+function tienePermiso(permiso, user) {
+  const u = user || currentUser;
+  if (!u) return false;
+  if (u.role === 'admin') return true;
+  return (u.permisos || []).includes(permiso);
+}
+
 function can(action) {
   const r = currentUser.role;
   const perms = {
@@ -682,14 +700,19 @@ const NAV_ITEMS = [
   { id:'fabrica', label:'Depósito Fábrica', icon:'🏭', section:'Fábrica', roles:['admin','fabrica'] },
   { id:'tesoreria', label:'Tesorería / Cajas', icon:'💰', section:'Finanzas', roles:['admin','interno'] },
   { id:'pagos', label:'Pagos', icon:'💳', section:'Finanzas', roles:['admin','interno'] },
-  { id:'reportes', label:'Reportes', icon:'📈', section:'Análisis', roles:['admin'] },
+  { id:'reportes', label:'Reportes', icon:'📈', section:'Análisis', roles:['admin','interno','externo'] },
   { id:'usuarios', label:'Usuarios', icon:'🔑', section:'Config', roles:['admin'] },
   { id:'config', label:'Configuración', icon:'⚙️', section:'Config', roles:['admin'] },
 ];
 
 function buildNav() {
   const nav = document.getElementById('sidebar-nav');
-  const visible = NAV_ITEMS.filter(n => n.roles.includes(currentUser.role));
+  const visible = NAV_ITEMS.filter(n => {
+    if (!n.roles.includes(currentUser.role)) return false;
+    // Extra permission checks
+    if (n.id === 'reportes' && currentUser.role !== 'admin') return tienePermiso('ver_reportes_venta');
+    return true;
+  });
   const sections = [...new Set(visible.map(n=>n.section))];
   nav.innerHTML = sections.map(sec => `
     <div class="nav-section">
@@ -801,16 +824,18 @@ function renderMiniPagos() {
 
 // ===================== ÓRDENES =====================
 function getOrdenesVisibles() {
-  if (currentUser.role === 'externo') {
-    const misClientes = DB.clientesVendedor[currentUser.id] || [];
-    return DB.ordenes.filter(o => o.vendedorId===currentUser.id || misClientes.includes(o.clienteId));
-  }
-  return DB.ordenes;
+  // Admin ve todo
+  if (currentUser.role === 'admin') return DB.ordenes;
+  // Si tiene permiso de ver ops de otros, ve todo
+  if (tienePermiso('ver_ops_otros')) return DB.ordenes;
+  // Externos y sin permiso: solo sus propias órdenes y las de sus clientes asignados
+  const misClientes = DB.clientesVendedor[currentUser.id] || [];
+  return DB.ordenes.filter(o => o.vendedorId===currentUser.id || misClientes.includes(o.clienteId));
 }
 
 function renderOrdenes() {
   const topbar = document.getElementById('topbar-actions');
-  topbar.innerHTML = `<button class="btn btn-primary" onclick="abrirNuevaOrden()">+ Nueva orden</button>`;
+  topbar.innerHTML = tienePermiso('carga_pedidos') ? `<button class="btn btn-primary" onclick="abrirNuevaOrden()">+ Nueva orden</button>` : '';
   
   const ordenes = getOrdenesVisibles();
   let html = `
@@ -851,7 +876,13 @@ function filtrarTablaOrdenes() {
     tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text3);padding:40px">Sin órdenes</td></tr>';
     return;
   }
-  tbody.innerHTML = lista.map(o => `
+  tbody.innerHTML = lista.map(o => {
+    const esPropia = o.vendedorId === currentUser.id;
+    const puedeAprobar = tienePermiso('aprobar_entrega_otros') || (esPropia && tienePermiso('aprobar_propia_entrega'));
+    const okBadge = o.okEntrega
+      ? `<span style="background:#dcfce7;color:#16a34a;border-radius:20px;padding:2px 8px;font-size:11px;font-weight:600;white-space:nowrap">✅ OK Entrega</span>`
+      : `<span style="background:#fef9c3;color:#92400e;border-radius:20px;padding:2px 8px;font-size:11px;font-weight:600;white-space:nowrap">⏳ Pendiente aprobación</span>`;
+    return `
     <tr class="clickable" onclick="verOrden(${o.id})">
       <td><span style="font-family:monospace;font-size:12px;font-weight:600">#${String(o.numero).padStart(4,'0')}</span></td>
       <td>${fmtFecha(o.fecha)}</td>
@@ -860,13 +891,16 @@ function filtrarTablaOrdenes() {
       <td style="font-weight:600">${fmtMoney(o.total)}</td>
       <td>${badgeEstadoOrden(o.estado, o.preparado)}</td>
       <td onclick="event.stopPropagation()" style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+        ${okBadge}
+        ${puedeAprobar && !o.okEntrega ? `<button class="btn btn-sm btn-success" onclick="aprobarEntrega(${o.id})" title="Marcar OK para entrega">✓ Aprobar entrega</button>` : ''}
+        ${puedeAprobar && o.okEntrega ? `<button class="btn btn-sm btn-secondary" style="font-size:11px;padding:2px 7px" onclick="revocarEntrega(${o.id})" title="Revocar aprobación">↩ Revocar</button>` : ''}
         <button class="btn btn-sm ${o.preparado?'btn-secondary':'btn-success'}" onclick="abrirPreparacion(${o.id})" title="${o.preparado?'Ver preparación':'Preparar pedido'}">
           ${o.preparado?'✓ Preparado':'📦 Preparar'}
         </button>
         ${o.estado==='pendiente' ? `<button class="btn btn-sm btn-primary" onclick="emitirTicket(${o.id})">Emitir ticket</button>` : `<button class="btn btn-sm btn-secondary" onclick="verTicketDeOrden(${o.id})">Ver ticket</button>`}
       </td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
 }
 
 function abrirNuevaOrden() {
@@ -1202,6 +1236,14 @@ function verOrden(id) {
         <div><span style="color:var(--text3);font-size:12px">Fecha</span><br><strong>${fmtFecha(o.fecha)}</strong></div>
         <div><span style="color:var(--text3);font-size:12px">Estado</span><br>${badgeEstadoOrden(o.estado)}</div>
         <div><span style="color:var(--text3);font-size:12px">Vendedor</span><br><strong>${getUser(o.vendedorId)?.name||'-'}</strong></div>
+      </div>
+      <div style="margin-bottom:14px;padding:10px 14px;border-radius:var(--radius-sm);background:${o.okEntrega?'#f0fdf4':'#fefce8'};border:1.5px solid ${o.okEntrega?'#86efac':'#fde68a'}">
+        <span style="font-size:13px;font-weight:600;color:${o.okEntrega?'#15803d':'#92400e'}">
+          ${o.okEntrega ? '✅ Entrega aprobada por ' + (getUser(o.okEntregaPor)?.name||'?') + ' el ' + fmtFecha(o.okEntregaFecha) : '⏳ Entrega pendiente de aprobación'}
+        </span>
+        ${!o.okEntrega && (tienePermiso('aprobar_entrega_otros') || (o.vendedorId===currentUser.id && tienePermiso('aprobar_propia_entrega')))
+          ? `<button class="btn btn-sm btn-success" style="margin-left:12px" onclick="aprobarEntrega(${o.id});closeModal('modal-ver-orden')">✓ Aprobar ahora</button>`
+          : ''}
       </div>
       <table class="items-table" style="width:100%;margin-bottom:16px">
         <thead><tr><th>Artículo</th><th>Variante</th><th>Cant.</th><th>Precio</th><th>Subtotal</th></tr></thead>
@@ -2161,9 +2203,9 @@ function guardarArticulo(editId) {
 // ===================== PAGOS =====================
 function renderPagos() {
   const topbar = document.getElementById('topbar-actions');
-  topbar.innerHTML = `<button class="btn btn-primary" onclick="abrirNuevoPago()">+ Registrar pago</button>`;
+  topbar.innerHTML = tienePermiso('carga_cobranzas') ? `<button class="btn btn-primary" onclick="abrirNuevoPago()">+ Registrar pago</button>` : '';
 
-  const todosLosPagos = currentUser.role==='externo'
+  const todosLosPagos = !tienePermiso('ver_ops_otros')
     ? DB.pagos.filter(p=>(DB.clientesVendedor[currentUser.id]||[]).includes(p.clienteId)||p.vendedorId===currentUser.id)
     : DB.pagos;
 
@@ -2217,7 +2259,7 @@ function switchTabPagos(tab, btn) {
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
 
-  const todosLosPagos = currentUser.role==='externo'
+  const todosLosPagos = !tienePermiso('ver_ops_otros')
     ? DB.pagos.filter(p=>(DB.clientesVendedor[currentUser.id]||[]).includes(p.clienteId)||p.vendedorId===currentUser.id)
     : DB.pagos;
 
@@ -2496,13 +2538,13 @@ function registrarPagoInterno(clienteId, monto, forma, cajaId, ticketId, ordenId
 
 // ===================== TESORERÍA =====================
 function renderTesoreria() {
-  if (currentUser.role==='externo') {
+  if (currentUser.role==='externo' && !tienePermiso('agregar_ops_cajas') && !tienePermiso('modificar_ops_cajas')) {
     document.getElementById('content').innerHTML='<div class="empty-state">Sin acceso</div>'; return;
   }
   
   document.getElementById('topbar-actions').innerHTML = `
-    <button class="btn btn-secondary" onclick="abrirMovimientoCaja()">+ Movimiento</button>
-    <button class="btn btn-secondary" onclick="abrirTransferenciaCaja()">↔ Transferencia</button>
+    ${tienePermiso('agregar_ops_cajas') ? `<button class="btn btn-secondary" onclick="abrirMovimientoCaja()">+ Movimiento</button>` : ''}
+    ${tienePermiso('agregar_ops_cajas') ? `<button class="btn btn-secondary" onclick="abrirTransferenciaCaja()">↔ Transferencia</button>` : ''}
     ${currentUser.role==='admin'?`<button class="btn btn-primary" onclick="abrirNuevaCaja()">+ Nueva caja</button>`:''}
   `;
   
@@ -2718,11 +2760,12 @@ function renderUsuarios() {
     <div class="card" style="padding:0">
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Usuario</th><th>Nombre</th><th>Rol</th><th>Acciones</th></tr></thead>
+          <thead><tr><th>Usuario</th><th>Nombre</th><th>Rol</th><th>Permisos</th><th>Acciones</th></tr></thead>
           <tbody>${DB.users.map(u=>`<tr>
             <td style="font-family:monospace;font-size:12px">${u.username}</td>
             <td style="font-weight:600">${u.name}</td>
             <td><span class="badge ${u.role==='admin'?'badge-purple':u.role==='interno'?'badge-blue':'badge-green'}">${roleLabel(u.role)}</span></td>
+            <td style="font-size:12px;color:var(--text3)">${u.role==='admin' ? '<span style="color:var(--purple);font-weight:600">Todos</span>' : (u.permisos||[]).length ? (u.permisos||[]).map(p=>PERMISOS_LISTA.find(x=>x.id===p)?.label||p).join(', ') : '<em>Ninguno</em>'}</td>
             <td>
               <button class="btn btn-sm btn-secondary" onclick="editarUsuario(${u.id})">Editar</button>
               ${u.id!==currentUser.id?`<button class="btn btn-sm btn-danger" style="margin-left:4px" onclick="eliminarUsuario(${u.id})">Eliminar</button>`:''}
@@ -2737,6 +2780,14 @@ function renderUsuarios() {
 function abrirNuevoUsuario(editId) {
   const u = editId ? DB.users.find(x=>x.id===editId) : null;
   const clientesOpts = DB.clientes.map(c=>`<option value="${c.id}">${c.nombre}</option>`).join('');
+  const permisosHTML = PERMISOS_LISTA.map(p => {
+    const checked = u ? (u.permisos||[]).includes(p.id) : false;
+    return `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border)">
+      <input type="checkbox" id="perm-${p.id}" value="${p.id}" ${checked?'checked':''} style="width:16px;height:16px;accent-color:var(--accent)">
+      <span>${p.label}</span>
+    </label>`;
+  }).join('');
+
   showModal('modal-user', `
     <div class="modal-header">
       <span class="modal-title">${u?'Editar':'Nuevo'} Usuario</span>
@@ -2768,6 +2819,13 @@ function abrirNuevoUsuario(editId) {
           <p style="font-size:11px;color:var(--text3);margin-top:4px">Ctrl+clic para seleccionar múltiples</p>
         </div>
       </div>
+      <div class="form-group" id="permisos-grp" style="${u?.role==='admin'?'display:none':''}">
+        <label style="font-weight:600;margin-bottom:8px;display:block">Permisos</label>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 12px">
+          ${permisosHTML}
+        </div>
+        <p style="font-size:11px;color:var(--text3);margin-top:4px">El rol Administrador tiene todos los permisos automáticamente</p>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal('modal-user')">Cancelar</button>
@@ -2780,6 +2838,8 @@ function toggleClientesAsignados() {
   const role = document.getElementById('uu-role')?.value;
   const grp = document.getElementById('clientes-asignados-grp');
   if (grp) grp.style.display = role==='externo' ? 'block':'none';
+  const permGrp = document.getElementById('permisos-grp');
+  if (permGrp) permGrp.style.display = role==='admin' ? 'none':'block';
 }
 
 function editarUsuario(id) { abrirNuevoUsuario(id); }
@@ -2791,13 +2851,17 @@ function guardarUsuario(editId) {
   const role = document.getElementById('uu-role').value;
   const initials = document.getElementById('uu-init').value.toUpperCase()||name.split(' ').map(w=>w[0]).join('').substring(0,2);
   if (!name||!username) { alert('Completá nombre y usuario'); return; }
-  
+
+  // Recoger permisos seleccionados (solo para no-admin)
+  const permisos = role === 'admin' ? PERMISOS_LISTA.map(p=>p.id) :
+    PERMISOS_LISTA.map(p=>p.id).filter(id => document.getElementById('perm-'+id)?.checked);
+
   if (editId) {
     const u = DB.users.find(x=>x.id===editId);
-    if (u) { u.name=name; u.username=username; u.role=role; u.initials=initials; if(pass) u.password=pass; }
+    if (u) { u.name=name; u.username=username; u.role=role; u.initials=initials; u.permisos=permisos; if(pass) u.password=pass; }
   } else {
     if (!pass) { alert('Ingresá contraseña'); return; }
-    DB.users.push({id:Date.now(),username,password:pass,name,role,initials});
+    DB.users.push({id:Date.now(),username,password:pass,name,role,initials,permisos});
   }
   
   // Asignar clientes a externo
@@ -3676,6 +3740,32 @@ function confirmarOrdenPreparada(ordenId) {
   marcarOrdenPreparada(ordenId);
 }
 
+function aprobarEntrega(ordenId) {
+  const o = DB.ordenes.find(x=>x.id===ordenId);
+  if (!o) return;
+  const esPropia = o.vendedorId === currentUser.id;
+  const puedeAprobar = tienePermiso('aprobar_entrega_otros') || (esPropia && tienePermiso('aprobar_propia_entrega'));
+  if (!puedeAprobar) { showToast('⚠ No tenés permiso para aprobar esta entrega'); return; }
+  o.okEntrega = true;
+  o.okEntregaPor = currentUser.id;
+  o.okEntregaFecha = todayDate();
+  filtrarTablaOrdenes();
+  showToast('✅ Entrega aprobada para Orden #' + String(o.numero).padStart(4,'0'));
+}
+
+function revocarEntrega(ordenId) {
+  const o = DB.ordenes.find(x=>x.id===ordenId);
+  if (!o) return;
+  const esPropia = o.vendedorId === currentUser.id;
+  const puedeAprobar = tienePermiso('aprobar_entrega_otros') || (esPropia && tienePermiso('aprobar_propia_entrega'));
+  if (!puedeAprobar) { showToast('⚠ No tenés permiso'); return; }
+  o.okEntrega = false;
+  delete o.okEntregaPor;
+  delete o.okEntregaFecha;
+  filtrarTablaOrdenes();
+  showToast('↩ Aprobación de entrega revocada');
+}
+
 function procesarQREscaneado(ordenId, raw) {
   // In new flow: just accumulate
   acumularBultoEscaneado(raw);
@@ -3743,14 +3833,13 @@ function scanQRLoop(ordenId) {
   qrScanFrame(video, canvas, (raw) => {
     if (!window._prepScanRef.active) return;
     window._prepScanRef.active = false;
-    procesarQREscaneado(ordenId, raw);
-    setQRStatus('qr-status', '✓ Leído — esperando...', 'rgba(22,163,74,0.8)');
+    // Acumula directamente sin validar contra la orden (el nuevo flujo)
+    acumularBultoEscaneado(raw);
     setTimeout(() => {
       if (!document.getElementById('overlay-modal-prep')) return;
-      setQRStatus('qr-status', 'Apuntá la cámara al QR del bulto');
       window._prepScanRef.active = true;
-      qrScanFrame(video, canvas, onQRDetected, window._prepScanRef);
-    }, 2000);
+      qrScanFrame(video, canvas, arguments.callee, window._prepScanRef);
+    }, 1500);
   }, window._prepScanRef);
 }
 
